@@ -1,0 +1,109 @@
+
+input_broadcasted_cols = c.sqlContext.sparkContext.broadcast(input_df.columns)
+
+block_size = 1000
+params['logger'].info('{} - calc results'.format(model_codes[model_code]))
+output = input_df.rdd.mapPartitions(lambda partition: block_classify(partition,
+                                                                     block_size,
+                                                                     input_broadcasted_cols,
+                                                                     model_code,
+                                                                     params))
+
+fields = [StructField(obj_id_col_name, StringType(), True), \
+          StructField(clu_id_col_name, StringType(), True), \
+          StructField('probCure', DoubleType(), True), \
+          StructField('probCess', DoubleType(), True), \
+          StructField('probLiq', DoubleType(), True), \
+          StructField('LGDcure', DoubleType(), True), \
+          StructField('LGDcess', DoubleType(), True), \
+          StructField('LGDliq', DoubleType(), True), \
+          StructField('LGDscore', DoubleType(), True), \
+          StructField('LGDcalibr', DoubleType(), True), \
+          StructField('LGDfincol', DoubleType(), True), \
+          StructField('LGD', DoubleType(), True), \
+          StructField('LGDdt', DoubleType(), True), \
+          StructField('LGDpricing', DoubleType(), True), ]
+bb_schema = StructType(fields)
+output = (
+    c.sqlContext.createDataFrame(output, bb_schema)
+        .drop("LGDpricing")
+        .withColumn("lgd_model", lit(model_codes[model_code]))
+        .withColumn("request_dt", current_timestamp())
+
+
+from pyspark import SparkFiles
+from pyspark.sql import DataFrame
+from pyspark.sql.functions import array, col, explode, lit, struct
+from typing import Iterable
+
+
+def spark_melt(df: DataFrame, id_vars: Iterable[str], value_vars: Iterable[str],
+               var_name: str = "variable", value_name: str = "value") -> DataFrame:
+    """
+    Конвертирует Spark DataFrame в длинный KV-формат (операция melt)
+    :param df: исходный Spark DataFrame
+    :param id_vars: список переменных которые останутся в индексе
+    :param value_vars: список переменных которые будут развернуты в KEY
+    :param var_name: имя переменной KEY
+    :param value_name: имя переменной VALUE
+    :return: датафрейм с проведенной операцией KV
+    """
+    _vars_and_vals = array(*(
+        struct(lit(c.name.lower()).alias(var_name), col(c.name.lower()).alias(value_name))
+        for c in value_vars if c.name.lower() not in id_vars))
+
+    # Add to the DataFrame and explode
+    _tmp = df.withColumn("_vars_and_vals", explode(_vars_and_vals))
+
+    cols = id_vars + [col("_vars_and_vals")[x].alias(x) for x in [var_name, value_name]]
+    return _tmp.select(*cols)
+
+
+import datetime
+
+from pyspark import SparkContext, SparkConf, SparkFiles
+from pyspark.sql.functions import col, lit, current_timestamp
+# from pyspark.storagelevel import StorageLevel
+from pyspark.sql.types import *
+def block_iterator(iterator, size):
+    """
+    dest:
+        сервисная функция для итерации по блокам данных внутри RDD.
+        Чем больше size при увеличении количества потоков, тем быстрее обработка
+    args:
+        iterator-объект
+        size - размер элементов для единичной итерации
+    return:
+        вычисляемый объект bucket
+    """
+    bucket = list()
+    for e in iterator:
+        bucket.append(e)
+        if len(bucket) >= size:
+            yield bucket
+            bucket = list()
+    if bucket:
+        yield bucket
+
+def block_classify(iterator, block_size, input_broadcasted_cols, model_code, params):
+    """
+        - iterator - объект итерации по текущей partition,
+        - logger - логгер,
+        - block_size - размер блока
+    """
+    import pandas as pd, pickle, json
+    from model_namr import model as model
+    model_codes = ‘string_code’
+
+    for rows in block_iterator(iterator, block_size):
+        # получаем исходные данные в виде df
+        rows_df = pd.DataFrame(list(rows), columns=input_cols)
+        try:
+            results = rows_df.apply(lambda x: model(x, *args, **kwargs), axis=1)
+            params['logger'].info('AppDEBUGLOG: Scoring result success')
+            # generate output
+            for j in json.loads(results.to_json(orient='records')):
+                yield j
+        except Exception as e:
+            params['logger'].error('Ошибка на стадии модели; {e}'.format(e=e))
+
