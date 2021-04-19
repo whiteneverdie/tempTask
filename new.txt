@@ -100,10 +100,10 @@ def block_classify(iterator, block_size, input_broadcasted_cols, model_code, par
         rows_df = pd.DataFrame(list(rows), columns=input_cols)
         try:
             results = rows_df.apply(lambda x: model(x, *args, **kwargs), axis=1)
-            params['logger'].info('AppDEBUGLOG: Scoring result success')
+            logger.info('result success')
             # generate output
             for j in json.loads(results.to_json(orient='records')):
                 yield j
         except Exception as e:
-            params['logger'].error('Ошибка на стадии модели; {e}'.format(e=e))
+            logger.error('Ошибка; {e}'.format(e=e))
 
